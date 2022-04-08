@@ -1,4 +1,4 @@
-package cache
+package go_cache
 
 import (
 	"errors"

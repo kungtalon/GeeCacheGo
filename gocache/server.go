@@ -1,19 +1,26 @@
-package web
+package gocache
 
 import (
-	"RedisGo/cache"
 	"fmt"
+	"gocache/coordinator"
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 )
 
-const defaultBasePath = "/_geecache/"
+const (
+	defaultBasePath = "/_geecache/"
+	defaultReplicas = 50
+)
 
-// HTTPPool implements PeerPicker for a pool of HTTP peers
+// HTTPPool implements PeerPicker
 type HTTPPool struct {
-	self     string
-	basePath string
+	self        string
+	basePath    string
+	mu          sync.Mutex
+	peers       *coordinator.HashRing
+	httpGetters map[string]*httpGetter
 }
 
 func NewHTTPPool(self string) *HTTPPool {
@@ -43,7 +50,7 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	groupName := parts[0]
 	key := parts[1]
 
-	group := cache.GetGroup(groupName)
+	group := GetGroup(groupName)
 	if group == nil {
 		http.Error(w, "No such group: "+groupName, http.StatusNotFound)
 		return
@@ -58,3 +65,28 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Write(view.ByteSlice())
 }
+
+// Set pushes all peer names to the hash ring
+func (p *HTTPPool) Set(peers ...string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.peers = coordinator.New(defaultReplicas, "", nil)
+	p.peers.Add(peers...)
+	p.httpGetters = make(map[string]*httpGetter, len(peers))
+	for _, peer := range peers {
+		p.httpGetters[peer] = &httpGetter{peer + p.basePath}
+	}
+}
+
+// PickPeer gets the peer name from hashring and return the PeerGetter
+func (p *HTTPPool) PickPeer(key string) (PeerGetter, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if peer := p.peers.Get(key); peer != "" && peer != p.self {
+		p.Logf("Pick peer %s", peer)
+		return p.httpGetters[peer], true
+	}
+	return nil, false
+}
+
+var _ PeerPicker = (*HTTPPool)(nil)
